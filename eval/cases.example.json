@@ -1,0 +1,12 @@
+{
+  "1234-redirect-host": {
+    "sha": "0000000000000000000000000000000000000000",
+    "title": "fix(portal): a payment link redirects on the host the user is on",
+    "notes": "Closes #1234\nWhy: every redirect was built from request.url, which behind the proxy is the container's listen address\nRejected: reading the host from the account's settings; an unknown code has no account to look up\nMeasured: src/app/d/__tests__/route.test.ts 8 passed, 2 new\nNot run: the live route, which needs a deploy"
+  },
+  "1240-settings-tab": {
+    "sha": "1111111111111111111111111111111111111111",
+    "title": "feat(dashboard): the export options move from Reports to Settings",
+    "notes": "Why: the Reports page had grown a tab that has nothing to do with reports\nMeasured: none, a page move; the export itself is unchanged"
+  }
+}
