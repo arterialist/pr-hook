@@ -5,7 +5,10 @@
 
 The fake agy serves canned bodies from FAKE_AGY_BODIES (a file, bodies split
 by a line of ===) in call order, counts calls in FAKE_AGY_COUNT, and saves
-the last prompt to FAKE_AGY_PROMPT.
+the last prompt to FAKE_AGY_PROMPT. Like the real one it keeps each call as a
+conversation under $HOME/.gemini/<--app_data_dir, default antigravity-cli>
+and prints text, or JSON with the conversation id under --output-format json.
+HOME is the test's temp directory.
 """
 import hashlib
 import json
@@ -19,8 +22,15 @@ HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(HOOKS, "pr-body-gate-agy.py")
 
 FAKE_AGY = r'''#!/usr/bin/env python3
-import os, sys
+import json, os, sys, uuid
 args = sys.argv[1:]
+flag = lambda name, default: args[args.index(name) + 1] if name in args else default
+store = os.path.join(os.environ["HOME"], ".gemini", flag("--app_data_dir", "antigravity-cli"))
+conversation = str(uuid.uuid4())
+os.makedirs(os.path.join(store, "brain", conversation, "scratch"))
+for name in ("conversations/%s.db", "annotations/%s.pbtxt", "presence/%s.lock"):
+    os.makedirs(os.path.dirname(os.path.join(store, name)), exist_ok=True)
+    open(os.path.join(store, name % conversation), "w").close()
 prompt = args[args.index("-p") + 1]
 prompt = "MODEL=" + args[args.index("--model") + 1] + "\n" + prompt
 with open(os.environ["FAKE_AGY_PROMPT"], "w") as fh:
@@ -31,7 +41,10 @@ if os.path.exists(os.environ["FAKE_AGY_COUNT"]):
 with open(os.environ["FAKE_AGY_COUNT"], "w") as fh:
     fh.write(str(n + 1))
 bodies = open(os.environ["FAKE_AGY_BODIES"]).read().split("\n===\n")
-sys.stdout.write(bodies[min(n, len(bodies) - 1)])
+body = bodies[min(n, len(bodies) - 1)]
+if flag("--output-format", "text") == "json":
+    body = json.dumps({"conversation_id": conversation, "status": "SUCCESS", "response": body})
+sys.stdout.write(body)
 '''
 
 GOOD = """Closes #1234
@@ -67,9 +80,15 @@ class GateTest(unittest.TestCase):
                         FAKE_AGY_BODIES=self.bodies,
                         FAKE_AGY_COUNT=self.count,
                         FAKE_AGY_PROMPT=self.prompt,
-                        TMPDIR=self.tmp)
+                        TMPDIR=self.tmp,
+                        HOME=self.tmp)
         self.env.pop("PR_BODY_GATE_MODEL", None)
         self.env.pop("PR_BODY_GATE_BASE", None)
+        self.user_store = os.path.join(self.tmp, ".gemini", "antigravity-cli")
+        self.gate_store = os.path.join(self.tmp, ".gemini", "pr-body-gate")
+        os.makedirs(self.user_store)
+        with open(os.path.join(self.user_store, "settings.json"), "w") as fh:
+            fh.write('{"auth": "api key"}')
         self.repo = os.path.join(self.tmp, "repo")
         subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True)
         g = ["git", "-C", self.repo, "-c", "user.email=t@t", "-c", "user.name=t",
@@ -100,6 +119,13 @@ class GateTest(unittest.TestCase):
     def read(self, path):
         with open(path) as fh:
             return fh.read()
+
+    def assert_no_conversation_is_kept(self):
+        self.assertEqual(os.listdir(self.user_store), ["settings.json"])
+        for kind in ("conversations", "brain", "annotations", "presence"):
+            self.assertEqual(os.listdir(os.path.join(self.gate_store, kind)), [], kind)
+        self.assertEqual(self.read(os.path.join(self.gate_store, "settings.json")),
+                         '{"auth": "api key"}')
 
     def run_hook(self, command, tool_name="Bash"):
         tool_input = {"command": command, "description": "file the PR", "timeout": 120000}
@@ -169,6 +195,7 @@ class GateTest(unittest.TestCase):
         self.assertIn("+two", prompt)  # the diff against the fallback base, main
         self.assertIn("feat: second line", prompt)  # the title
         self.assertEqual(self.calls(), 1)
+        self.assert_no_conversation_is_kept()
 
     def test_base_comes_from_the_flag_then_the_environment(self):
         self.serve(GOOD)
@@ -203,6 +230,7 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.calls(), 3)
         self.assertIn("3 attempts", out["permissionDecisionReason"])
         self.assertIn("Spelled-out number", out["permissionDecisionReason"])
+        self.assert_no_conversation_is_kept()
 
     def test_generated_body_file_passes_without_a_call(self):
         self.serve(GOOD)

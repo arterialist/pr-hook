@@ -130,6 +130,18 @@ The base branch is `--base`, then the base of the open PR for `gh pr edit`, then
 
 The hook diffs the directory where Claude Code runs. A `cd` inside the command does not change that directory.
 
+### Conversations
+
+`agy` keeps each call as a conversation and has no command that deletes one. The hook keeps its calls out of your conversation list:
+
+- It runs `agy` with `--app_data_dir pr-body-gate`. The calls go to `~/.gemini/pr-body-gate`, not to `~/.gemini/antigravity-cli`.
+- It deletes the files of each conversation when `agy` returns. This includes the calls for rejected drafts.
+- It links `~/.gemini/antigravity-cli/settings.json` into that directory. `agy` then uses the same login as your other calls.
+
+`--app_data_dir` is not in `agy --help`. If a later `agy` removes the flag, the hook denies the command and shows the error from `agy`.
+
+`eval/compare_models.py` calls `agy` for the judge without this flag. Those calls stay in your conversation list.
+
 ### Model
 
 The default model is `gemini-3.8-flash-medium`. Set `PR_BODY_GATE_MODEL` to another id from `agy models`.

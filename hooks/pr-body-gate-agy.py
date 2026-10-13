@@ -13,6 +13,17 @@ is read as author notes (issue numbers, what was measured, intent). The hook:
   3. Writes the body to GENERATED_DIR/<sha>.md and rewrites the command to
      `--body-file <that path>` via updatedInput.
 
+agy keeps every print call as a conversation and has no command that deletes
+one. A conversation removed by hand from ~/.gemini/antigravity-cli comes back
+in the list on the next agy start, restored from jetbox_summaries_proto.pb.
+So the gate runs agy on a data directory of its own, AGY_HOME/AGY_STORE
+(the hidden --app_data_dir flag), and deletes each call's conversation files
+there when agy returns. The user's conversation list never sees a gate call.
+settings.json in that directory is a link to the user's, which keeps the
+auth method agy uses everywhere else. Without it agy ignores an API key set
+there, falls back to the keyring login and makes extra network calls on
+every start.
+
 A --body-file inside GENERATED_DIR whose content hash matches its name is one
 the hook wrote: it passes unchanged, with no agy call. An edited one is read
 as notes again. If the command cannot be rewritten in place, the hook denies
@@ -38,6 +49,7 @@ Refuses --fill / -f outright.
 pr-body-gate.py is the other version: it lints the body the caller wrote and
 calls no model. Install one of the two, not both.
 """
+import glob
 import hashlib
 import json
 import os
@@ -64,6 +76,10 @@ MEASURE_CLASSES = (
 MAX_ATTEMPTS = 3
 MODEL = os.environ.get("PR_BODY_GATE_MODEL", "gemini-3.8-flash-medium")
 AGY_TIMEOUT_S = 150  # medium calls have run 72 s; high up to 80 s
+AGY_HOME = os.path.expanduser("~/.gemini")
+AGY_STORE = "pr-body-gate"  # --app_data_dir: a directory name under AGY_HOME, never a path
+AGY_USER_SETTINGS = os.path.join(AGY_HOME, "antigravity-cli", "settings.json")
+CONVERSATION_ID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 DIFF_BUDGET = 60_000  # chars of diff handed to the model
 MAX_LISTED_FILES = 200  # above this, the stat is per directory and omitted files are a count
 GENERATED_DIR = os.path.join(tempfile.gettempdir(), "pr-body-gate")
@@ -291,9 +307,29 @@ def agy_path() -> str:
     return ""  # unreachable
 
 
+def agy_store() -> str:
+    store = os.path.join(AGY_HOME, AGY_STORE)
+    os.makedirs(store, exist_ok=True)
+    try:
+        os.symlink(AGY_USER_SETTINGS, os.path.join(store, "settings.json"))
+    except FileExistsError:
+        pass
+    return store
+
+
+def delete_conversation(store: str, conversation_id: str) -> None:
+    """Remove conversations/<id>.db, brain/<id>, annotations/<id>.pbtxt and presence/<id>.lock."""
+    for path in glob.glob(os.path.join(store, "*", conversation_id + "*")):
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+
+
 def run_agy(prompt: str, cwd: str) -> str:
-    cmd = [agy_path(), "--model", MODEL, "--output-format", "text",
-           "--disable-slash-commands", "--sandbox",
+    store = agy_store()
+    cmd = [agy_path(), "--app_data_dir", AGY_STORE, "--model", MODEL,
+           "--output-format", "json", "--disable-slash-commands", "--sandbox",
            "--print-timeout", f"{AGY_TIMEOUT_S}s", "-p", prompt]
     try:
         out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
@@ -305,7 +341,16 @@ def run_agy(prompt: str, cwd: str) -> str:
     if out.returncode != 0:
         err = (out.stderr or out.stdout).strip()
         deny(f"agy ({MODEL}) failed (exit {out.returncode}): {err}")
-    return out.stdout
+    try:
+        reply = json.loads(out.stdout)
+        conversation_id, response = reply["conversation_id"], reply["response"]
+    except (ValueError, KeyError, TypeError):
+        conversation_id = response = None
+    if not (isinstance(response, str) and CONVERSATION_ID.fullmatch(str(conversation_id))):
+        deny(f"agy ({MODEL}) did not print the JSON the gate reads, an object with "
+             f"conversation_id and response. It printed: {out.stdout.strip()}")
+    delete_conversation(store, conversation_id)
+    return response
 
 
 def clean(text: str) -> str:
